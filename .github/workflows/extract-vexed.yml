@@ -91,3 +91,5 @@ jobs:
             git commit -m "Extract Vexed.zip"
             git push
           fi
+
+# Workflow revision to start extraction.
