@@ -1,0 +1,93 @@
+name: Extract Vexed ZIP
+
+on:
+  push:
+    paths:
+      - 'Vexed.zip'
+      - '.github/workflows/extract-vexed.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Extract archive safely
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os
+          import shutil
+          import stat
+          import zipfile
+          from pathlib import PurePosixPath
+
+          archive = "Vexed.zip"
+          stage = os.path.abspath("_vexed_extract")
+          os.makedirs(stage, exist_ok=True)
+
+          with zipfile.ZipFile(archive) as z:
+              entries = []
+              for info in z.infolist():
+                  name = info.filename
+                  p = PurePosixPath(name)
+                  mode = info.external_attr >> 16
+                  if (p.is_absolute() or ".." in p.parts or "\\" in name
+                      or not p.parts or p.parts[0] in (".git", ".github")
+                      or name == archive or stat.S_ISLNK(mode)):
+                      raise SystemExit(f"Unsafe archive entry: {name}")
+                  entries.append((info, p))
+
+              files = [p for _, p in entries if not p.as_posix().endswith("/")]
+              if not files:
+                  raise SystemExit("Archive contains no files")
+
+              # Remove one common top-level directory when it is only a wrapper.
+              first = {p.parts[0] for p in files}
+              strip = len(first) == 1 and all(len(p.parts) > 1 for p in files)
+              for info, p in entries:
+                  if strip:
+                      p = PurePosixPath(*p.parts[1:])
+                  if not p.parts:
+                      continue
+                  target = os.path.abspath(os.path.join(stage, *p.parts))
+                  if os.path.commonpath([stage, target]) != stage:
+                      raise SystemExit(f"Path escapes extraction directory: {info.filename}")
+                  if info.is_dir():
+                      os.makedirs(target, exist_ok=True)
+                  else:
+                      os.makedirs(os.path.dirname(target), exist_ok=True)
+                      with z.open(info) as src, open(target, "wb") as dst:
+                          shutil.copyfileobj(src, dst)
+
+          for root, dirs, files in os.walk(stage):
+              dirs[:] = [d for d in dirs if d not in (".git", ".github")]
+              for filename in files:
+                  src = os.path.join(root, filename)
+                  rel = os.path.relpath(src, stage)
+                  dst = os.path.join(os.getcwd(), rel)
+                  os.makedirs(os.path.dirname(dst), exist_ok=True)
+                  shutil.copy2(src, dst)
+          shutil.rmtree(stage)
+          PY
+
+      - name: Commit extracted files
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- .
+          git reset -- Vexed.zip .github/workflows/extract-vexed.yml
+          if git diff --cached --quiet; then
+            echo "No extracted changes to commit."
+          else
+            git commit -m "Extract Vexed.zip"
+            git push
+          fi
